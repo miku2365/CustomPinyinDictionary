@@ -1,0 +1,105 @@
+name: Dictionary Conversion and Release
+
+env:
+  TZ: Asia/Shanghai
+  
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository master branch
+        uses: actions/checkout@master 
+
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8'
+
+      - name: Setup Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libime-bin wget jq      
+          wget -q https://github.com/studyzy/imewlconverter/releases/download/v3.2.0/imewlconverter_Linux.tar.gz
+          tar -xzf imewlconverter_Linux.tar.gz
+
+      - name: Get Latest Release Version
+        id: get_version_and_body
+        run: |
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/wuhgit/CustomPinyinDictionary/releases/latest)
+          LATEST_VERSION=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("CustomPinyinDictionary_Fcitx_.*.tar.gz")) | .browser_download_url' |grep -oP '(?<=CustomPinyinDictionary_Fcitx_)\d+')
+          LATEST_BODY=$(echo "$LATEST_RELEASE" | jq -r '.body')
+          echo "LATEST_VERSION=${LATEST_VERSION}" >> $GITHUB_ENV
+          {
+            echo 'body<<EOF'
+            echo "$LATEST_BODY"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download Dictionary
+        run: |
+          DICTIONARY_URL="https://github.com/wuhgit/CustomPinyinDictionary/releases/latest/download/CustomPinyinDictionary_Fcitx_${{ env.LATEST_VERSION }}.tar.gz"
+          wget -q "${DICTIONARY_URL}" -O temp.tar.gz
+          tar -xzf temp.tar.gz 
+          DICTIONARY_DIR=$(pwd)
+          echo "DICTIONARY_DIR=${DICTIONARY_DIR}" >> $GITHUB_ENV
+
+      - name: Convert Dictionary
+        run: |
+          CURRENT_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+          echo "CURRENT_TIME=${CURRENT_TIME}" >> $GITHUB_ENV
+          cd "${{ env.DICTIONARY_DIR }}"
+          mkdir -p assets
+          # Convert Fcitx.dict to libpy.txt
+          libime_pinyindict -d CustomPinyinDictionary_Fcitx.dict ./assets/CustomPinyinDictionary_Fcitx.txt
+          cd publish
+          # Convert Dictionary to Rime
+          dotnet ImeWlConverterCmd.dll -i:libpy "${DICTIONARY_DIR}/assets/CustomPinyinDictionary_Fcitx.txt" -o:rime "${DICTIONARY_DIR}/assets/CustomPinyinDictionary_Rime.dict.yaml" -ct:pinyin -os:linux          
+      
+      - name: Add Header to Rime Dictionary
+        run: |
+          sed -i '1i\
+          # Rime dictionary\
+          # encoding: utf-8\
+          # ${{ env.CURRENT_TIME }}\
+          # 来源: \
+          #  - 百万常用词汇：https://github.com/wuhgit/CustomPinyinDictionary\
+          # \
+          ---\
+          name: CustomPinyinDictionary_Rime\
+          version: ${{ env.LATEST_VERSION }}\
+          sort: by_weight\
+          ...' ${{ env.DICTIONARY_DIR }}/assets/CustomPinyinDictionary_Rime.dict.yaml
+          
+      - name: Delete Old Release Assets
+        uses: mknejp/delete-release-assets@v1
+        if: github.ref == 'refs/heads/main'
+        with:
+          token: ${{ github.token }}
+          tag: v${{ env.LATEST_VERSION }}
+          fail-if-no-assets: false
+          fail-if-no-release: false
+          assets: "*"
+          
+      - name: Create or Update Release
+        uses: ncipollo/release-action@main
+        if: github.ref == 'refs/heads/main'
+        with:
+          token: ${{ github.token }}
+          name: CustomPinyinDictionary 
+          allowUpdates: true
+          replacesArtifacts: true
+          tag: v${{ env.LATEST_VERSION }}
+          body: |
+            Converted dictionary from https://github.com/wuhgit/CustomPinyinDictionary 
+            ${{ steps.get_version_and_body.outputs.body }}
+          artifacts: ${{ env.DICTIONARY_DIR }}/assets/*
